@@ -23,7 +23,6 @@ Morphic is an implementation of Friday Night Funkin' built in Python, offering e
 | Windows | ✅ Full support | Pre-built binaries available in releases |
 | Linux | ✅ Supported | Requires building from source |
 | macOS | ⚠️ Experimental | Self-compilation required, no official support provided |
-| Web | ⚠️ Limited | Browser-based version with reduced features |
 
 _For build instructions, see the [wiki](https://github.com/CodeSoftGit/Morphic/wiki)._
 
