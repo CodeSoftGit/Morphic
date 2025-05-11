@@ -3,32 +3,44 @@
 
 def combine_voices_in_directory(directory):
     import os
-    from pydub import AudioSegment
+    import subprocess
+    import sys
     from tqdm import tqdm
 
-    # Create a new AudioSegment for the combined audio
-    combined = AudioSegment.silent(duration=0)
-    
-    # Track the files we're combining
-    combined_files = []
-
+    # Check if ffmpeg is installed
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("Error: FFmpeg not found. Please install FFmpeg first.")
+        print("Visit: https://ffmpeg.org/download.html")
+        return
+        
     # Get all valid voice files
     voice_files = [f for f in os.listdir(directory) 
                   if f.startswith("Voices") and f.endswith(".ogg") and f != "Voices.ogg"]
     
-    # Iterate through all files in the directory with a progress bar
-    for filename in tqdm(voice_files, desc=f"Processing {os.path.basename(directory)}", unit="file"):
+    # Only proceed if we found files to combine
+    if not voice_files:
+        return
+        
+    # Prepare ffmpeg command
+    output_path = os.path.join(directory, "Voices.ogg")
+    
+    # Build the filter complex string for mixing
+    inputs = []
+    for filename in voice_files:
         file_path = os.path.join(directory, filename)
-        audio_segment = AudioSegment.from_ogg(file_path)
-        combined = combined.overlay(audio_segment)
-        combined_files.append(filename)
-
-    # Only export if we found files to combine
-    if combined_files:
-        # Export the combined audio to Voices.ogg
-        output_path = os.path.join(directory, "Voices.ogg")
-        combined.export(output_path, format="ogg")
-        print(f"Combined {len(combined_files)} voice files in {directory}")
+        inputs.append("-i")
+        inputs.append(file_path)
+    
+    filter_complex = f"amix=inputs={len(voice_files)}:duration=longest"
+    
+    # Execute ffmpeg command
+    command = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_complex, output_path]
+    
+    print(f"Processing {os.path.basename(directory)} ({len(voice_files)} files)...")
+    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print(f"Combined {len(voice_files)} voice files in {directory}")
 
 if __name__ == "__main__":
     import os

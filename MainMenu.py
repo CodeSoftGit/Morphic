@@ -3,7 +3,7 @@ from pygame import *
 import json
 import math
 import time as systime
-from Game import Main_game
+from Game import MainMenu
 import sys
 import random
 from DevTools import DevTools
@@ -1327,7 +1327,7 @@ while run:
                             restart = True
                             currentMenu = "Select music"
                             while restart:
-                                restart = Main_game(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
+                                restart = MainMenu(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
                                                    availableNoteStyles[selectedNoteStyle],
                                                    [K_a, K_s, K_w, K_d, K_LEFT, K_DOWN, K_UP, K_RIGHT], downscroll, render_scene, modcharts, selectedDifficulty)
                             if menuMusic:
@@ -1353,7 +1353,7 @@ while run:
                             # If difficulty_name is None, use a default string
                             if difficulty_name is None:
                                 difficulty_name = "Normal"
-                            restart = Main_game(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
+                            restart = MainMenu(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
                                               availableNoteStyles[selectedNoteStyle],
                                               [K_a, K_s, K_w, K_d, K_LEFT, K_DOWN, K_UP, K_RIGHT], downscroll, render_scene, modcharts, difficulty_name)
                         if menuMusic:
@@ -1535,7 +1535,7 @@ while run:
                                         menuMusic.stop()
                                     restart = True
                                     while restart:
-                                        restart = Main_game(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
+                                        restart = MainMenu(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
                                                             availableNoteStyles[selectedNoteStyle],
                                                             [K_a, K_s, K_w, K_d, K_LEFT, K_DOWN, K_UP, K_RIGHT], downscroll, render_scene, modcharts, selectedDifficulty)
                                     if menuMusic:
@@ -1613,7 +1613,7 @@ while run:
                                         difficulty_name = "Normal"
                                 else:
                                     difficulty_name = None
-                                restart = Main_game(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
+                                restart = MainMenu(musicList[selectedMusic], selectedSpeed, playAs, noDeath,
                                                     availableNoteStyles[selectedNoteStyle],
                                                     [K_a, K_s, K_w, K_d, K_LEFT, K_DOWN, K_UP, K_RIGHT], downscroll, render_scene, modcharts, difficulty_name)
                             if menuMusic:

@@ -24,7 +24,7 @@ modchart_functions = None  # Add this to store modchart functions
 autoplayerEnabled = False
 
 
-def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscroll, render_scene=True, modchart=True, difficulty=None):
+def MainMenu(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscroll, render_scene=True, modchart=True, difficulty=None):
     global Inst
     global Vocals
     global chart
@@ -416,25 +416,82 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
             filename = music
         
         Inst = mixer.Sound(os.path.join("assets", "Music", music, "Inst.ogg"))
-        Vocals = mixer.Sound(os.path.join("assets", "Music", music, "Voices.ogg"))
+        try:
+            Vocals = mixer.Sound(os.path.join("assets", "Music", music, "Voices.ogg"))
+        except FileNotFoundError:
+            # Voices.ogg isn't required and might not exist.
+            Vocals = None
         
         try:
             chart_path = os.path.join("assets", "Music", music, f"{filename}{difficulty}.json")
             chart_data = json.load(open(chart_path))
             
-            # Support both old format (notes array) and new format (notes.normal array)
+            # Handle Psych Engine format
             if "song" in chart_data:
-                if "player1" and "player2" in chart_data["song"]:
+                # Extract player characters if available
+                if "player1" in chart_data["song"] and "player2" in chart_data["song"]:
                     player1 = chart_data["song"]["player1"]
                     player2 = chart_data["song"]["player2"]
+                    print(f"Player 1: {player1}, Player 2: {player2}")
+                    
+                # Handle the notes array in different possible formats
                 if "notes" in chart_data["song"]:
-                    if isinstance(chart_data["song"]["notes"], dict) and "normal" in chart_data["song"]["notes"]:
+                    if isinstance(chart_data["song"]["notes"], list):
+                        # Standard Psych Engine format
+                        chart = []
+                        for section in chart_data["song"]["notes"]:
+                            # Handle Psych Engine's must_hit_section flag
+                            if "mustHitSection" in section and section["mustHitSection"] is False:  # Changed from True to False
+                                # Since Psych now leaves player and opponent on the same lane,
+                                # manually swap their note columns.
+                                section_copy = copy.deepcopy(section)
+                                for note in section_copy["sectionNotes"]:
+                                    if len(note) >= 2:  # Ensure the note has at least position and lane data
+                                        # Swap columns: if the note is in 0-3 (player), move it to 4-7 (opponent)
+                                        # and if in 4-7 (opponent), move it to 0-3 (player)
+                                        if 0 <= note[1] <= 3:
+                                            note[1] += 4
+                                        elif 4 <= note[1] <= 7:
+                                            note[1] -= 4
+                                chart.append(section_copy)
+                            else:
+                                chart.append(section)
+                        print("Using Psych Engine chart format")
+                    elif isinstance(chart_data["song"]["notes"], dict) and "normal" in chart_data["song"]["notes"]:
                         # New format: chart_data["song"]["notes"]["normal"]
-                        chart = chart_data["song"]["notes"]["normal"]
+                        raw_chart = chart_data["song"]["notes"]["normal"]
+                        chart = []
+                        for section in raw_chart:
+                            # Handle must_hit_section for this format too
+                            if "mustHitSection" in section and section["mustHitSection"] is True:
+                                section_copy = copy.deepcopy(section)
+                                for note in section_copy["sectionNotes"]:
+                                    if len(note) >= 2:
+                                        if 0 <= note[1] <= 3:
+                                            note[1] += 4
+                                        elif 4 <= note[1] <= 7:
+                                            note[1] -= 4
+                                chart.append(section_copy)
+                            else:
+                                chart.append(section)
                         print("Using new chart format (notes.normal)")
                     else:
                         # Old format: chart_data["song"]["notes"]
-                        chart = chart_data["song"]["notes"]
+                        raw_chart = chart_data["song"]["notes"]
+                        chart = []
+                        for section in raw_chart:
+                            # Handle must_hit_section here as well
+                            if "mustHitSection" in section and section["mustHitSection"] is True:
+                                section_copy = copy.deepcopy(section)
+                                for note in section_copy["sectionNotes"]:
+                                    if len(note) >= 2:
+                                        if 0 <= note[1] <= 3:
+                                            note[1] += 4
+                                        elif 4 <= note[1] <= 7:
+                                            note[1] -= 4
+                                chart.append(section_copy)
+                            else:
+                                chart.append(section)
                         print("Using old chart format")
             else:
                 # Handle legacy format that needed conversion
@@ -443,17 +500,36 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
                 
                 # Check if the converted format uses the new structure
                 if isinstance(chart["song"]["notes"], dict) and "normal" in chart["song"]["notes"]:
-                    chart = chart["song"]["notes"]["normal"]
+                    raw_chart = chart["song"]["notes"]["normal"]
                 else:
-                    chart = chart["song"]["notes"]
+                    raw_chart = chart["song"]["notes"]
+                
+                # Process must_hit_section for legacy format
+                chart = []
+                for section in raw_chart:
+                    if "mustHitSection" in section and section["mustHitSection"] is True:
+                        section_copy = copy.deepcopy(section)
+                        for note in section_copy["sectionNotes"]:
+                            if len(note) >= 2:
+                                if 0 <= note[1] <= 3:
+                                    note[1] += 4
+                                elif 4 <= note[1] <= 7:
+                                    note[1] -= 4
+                        chart.append(section_copy)
+                    else:
+                        chart.append(section)
         except Exception as e:
             print(f"Error loading chart: {e}")
             chart = []  # Fallback to empty chart
             
         try:
             # Try to get BPM from the chart file
-            bpm = json.load(open(f"assets\Music\{music}\{filename}{difficulty}.json"))["song"]["bpm"]
-            bpm = 240 / bpm
+            if "song" in chart_data and "bpm" in chart_data["song"]:
+                bpm = chart_data["song"]["bpm"]
+                bpm = 240 / bpm
+                print(f"Loaded BPM: {bpm}")
+            else:
+                bpm = 240 / 100
         except:
             bpm = 240 / 100
                 
@@ -494,7 +570,8 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
     play(musicName)
 
     temp1 = Inst.get_length()
-    temp2 = Vocals.get_length()
+    if Vocals:
+        temp2 = Vocals.get_length()
     if temp1 > temp2:
         musicLen = temp1
     else:
@@ -506,12 +583,13 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
 
     # region chart managment
     class Note:
-        def __init__(self, pos, column, side, length, noteId):
+        def __init__(self, pos, column, side, length, noteId, event=None):
             self.pos = pos
             self.column = column
             self.side = side
             self.length = length
             self.id = noteId
+            self.event = event # unused right now, but psych charts use them. perhaps they could be added? (psst. psst.)
 
     class LongNote:
         def __init__(self, pos, column, side, isEnd):
@@ -1687,7 +1765,8 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
     keyPressed = []
 
     Inst.play()
-    Vocals.play()
+    if Vocals:
+        Vocals.play()
     
     startTime = Time.time()
     
@@ -1711,12 +1790,12 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
             currentStep = currentBeat * 4
             
             # Store previous beat/step to detect changes
-            if not hasattr(Main_game, "prev_beat"):
-                Main_game.prev_beat = int(currentBeat)
-                Main_game.prev_step = int(currentStep)
+            if not hasattr(MainMenu, "prev_beat"):
+                MainMenu.prev_beat = int(currentBeat)
+                MainMenu.prev_step = int(currentStep)
             
             # Call onBeat callback when the beat changes
-            if int(currentBeat) > Main_game.prev_beat and modchart_functions and modchart_functions["onBeat"]:
+            if int(currentBeat) > MainMenu.prev_beat and modchart_functions and modchart_functions["onBeat"]:
                 try:
                     modchart_functions["onBeat"](
                         beat=int(currentBeat),
@@ -1724,10 +1803,10 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
                     )
                 except Exception as e:
                     print(f"Error in onBeat callback: {e}")
-                Main_game.prev_beat = int(currentBeat)
+                MainMenu.prev_beat = int(currentBeat)
             
             # Call onStep callback when the step changes
-            if int(currentStep) > Main_game.prev_step and modchart_functions and modchart_functions["onStep"]:
+            if int(currentStep) > MainMenu.prev_step and modchart_functions and modchart_functions["onStep"]:
                 try:
                     modchart_functions["onStep"](
                         step=int(currentStep),
@@ -1735,7 +1814,7 @@ def Main_game(musicName, speed, playAs, noDying, arrowSkinID, keybinds, downscro
                     )
                 except Exception as e:
                     print(f"Error in onStep callback: {e}")
-                Main_game.prev_step = int(currentStep)
+                MainMenu.prev_step = int(currentStep)
         except Exception as e:
             pass  # Silently fail if BPM data is missing
         
