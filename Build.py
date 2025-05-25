@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from typing import List
 
+additional_scripts = ["MainMenu.py", "ModchartCore.py", "Game.py", "GameClasses.py", "DevTools.py"]
+
 def fatal_error(message: str, exception: Exception = None) -> None:
     """Logs a fatal error and exits."""
     if exception:
@@ -107,12 +109,15 @@ def build_desktop(target_platform: str) -> None:
     # Determine the data separator for PyInstaller
     data_sep = ";" if target_platform == "windows" else ":"
     exe_name = "morphic.exe" if target_platform == "windows" else "morphic"
+    # Add additional scripts to the PyInstaller command
+    add_data_args = [f"--add-data={script}{data_sep}{script}" for script in additional_scripts]
     cmd = [
         "pyinstaller",
         "--onefile",
         f"--add-data=assets{data_sep}assets",
+        *add_data_args,
         "--name", "morphic",
-        str(project_root / "MainMenu.py")
+        str(project_root / "main.py")
     ]
     logging.info(f"Building desktop ({target_platform}) executable...")
     run_command(cmd)
