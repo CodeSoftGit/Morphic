@@ -15,6 +15,8 @@ import builtins # For access to min/max if needed without shadowing
 # Placeholder callback functions if not defined in the modchart
 def emptyfunc(*args, **kwargs): pass
 
+HEALTH_API_SCALING_FACTOR = 50.0 # Game health 0-100 <-> API health 0-2
+
 def create_generic_modchart_funcs():
     """Creates a dictionary of default callback functions."""
     return {
@@ -27,7 +29,7 @@ def create_generic_modchart_funcs():
         "onSongStart": emptyfunc,
         "onSongEnd": emptyfunc,
         "onNoteCreation": emptyfunc,
-        # "onSongWillEnd": onSongWillEnd,
+        "onSongWillEnd": emptyfunc, # Default for the game to call, mod can override
         "init": None,  # For mod-specific initialization
     }
 
@@ -74,6 +76,52 @@ def check_modchart(code):
         raise ValueError(f"Error analyzing imports: {str(e)}")
     return True
 
+def sandboxed_exec(code, globals=None, locals=None):
+    """
+    Executes the provided code in a restricted environment.
+    This function aims to provide a safer alternative to the built-in `exec` function
+    by limiting access to potentially harmful built-in functions and modules.
+
+    Args:
+        code (str): The Python code to execute.
+        globals (dict, optional): Global variables for the execution context. Defaults to a new empty dictionary.
+        locals (dict, optional): Local variables for the execution context. Defaults to a new empty dictionary.
+    """
+    if globals is None:
+        globals = {}
+    if locals is None:
+        locals = {}
+
+    # Define a whitelist of safe built-in functions
+    safe_builtins = {
+        'abs': abs, 'bool': bool, 'dict': dict, 'float': float, 'int': int,
+        'len': len, 'list': list, 'max': max, 'min': min,
+        'range': range, 'round': round, 'set': set, 'str': str, 'tuple': tuple,
+        # 'print' is handled by a custom wrapper in mod_script_globals
+    }
+
+    # Create a restricted environment by explicitly setting __builtins__ to a dictionary
+    # containing only the safe built-ins.  This prevents access to the original
+    # builtins module and its potentially dangerous functions.
+    restricted_globals = {'__builtins__': safe_builtins}
+    restricted_globals.update(globals)  # Add any provided globals
+
+    # Remove potentially dangerous names from globals (already restricted by __builtins__ but good for defense in depth)
+    restricted_globals.pop('__import__', None) # __import__ in restricted_globals is the safe one if provided by API
+    restricted_globals.pop('eval', None)
+    restricted_globals.pop('exec', None)
+    restricted_globals.pop('compile', None)
+    restricted_globals.pop('open', None) # Explicitly remove open from globals, though safe_builtins controls it
+
+    try:
+        # Execute the code within the restricted environment
+        compiled_code = compile(code, '<string>', 'exec')
+        exec(compiled_code, restricted_globals, locals)
+    except Exception as e:
+        # Consider logging this to a mod-specific log or providing more context
+        print(f"Error executing sandboxed code: {type(e).__name__}: {e}")
+        raise # Re-raise to be caught by runModchart
+
 
 def runModchart(code, game_context=None):
     """
@@ -111,19 +159,27 @@ def runModchart(code, game_context=None):
     # --- API Functions available to the modchart ---
     # These functions are defined here and will close over `game_context`.
 
+    # --- Custom Print for Modcharts ---
+    def _mod_print(*args, **kwargs):
+        print("[MODCHART]", *args, **kwargs)
+
+
     # --- Song Control ---
     def end_song_api():
-        # on_song_will_end_cb = mod_script_globals.get('onSongWillEnd')
-        # if on_song_will_end_cb:
-        #     try:
-        #         if on_song_will_end_cb() == False: # Mod cancelled the song end
-        #             return
-        #     except Exception as e:
-        #         print(f"Error in mod's onSongWillEnd callback: {e}")
+        # This API function is called by the mod.
+        # It can optionally call the mod's onSongWillEnd callback.
+        on_song_will_end_cb = game_context.get('onSongWillEnd') # Check game_context (locals of script)
+        if callable(on_song_will_end_cb) and on_song_will_end_cb is not emptyfunc:
+            try:
+                # If onSongWillEnd returns False, the song end is cancelled by the mod.
+                if on_song_will_end_cb() == False:
+                    return
+            except Exception as e:
+                _mod_print(f"Error in mod's onSongWillEnd callback: {type(e).__name__}: {e}")
         game_context['song_should_end'] = True
 
     def get_song_position_api():
-        return game_context.get('currentTime', 0) * 1000
+        return game_context.get('currentTime', 0) * 1000 # Convert seconds to milliseconds
 
     def restart_song_api(skip_transition=False):
         game_context['song_should_restart'] = True
@@ -137,12 +193,16 @@ def runModchart(code, game_context=None):
     def _get_pg_font(font_path=None, size=30):
         pg_font_module = game_context.get('pygame', {}).get('font')
         if not pg_font_module:
-            raise ValueError("Pygame font module not found in game_context.")
+            raise ValueError("Pygame font module not found in game_context. Cannot create font.")
         try:
             return pg_font_module.Font(font_path, size)
-        except: # Fallback to system font
-            print(f"Warning: Font '{font_path}' not found or error loading. Falling back to system font.")
-            return pg_font_module.SysFont("arial", size)
+        except Exception as e: # Catches pygame.error, FileNotFoundError, etc.
+            _mod_print(f"Warning: Font '{font_path}' not found or error loading ({type(e).__name__}: {e}). Falling back to system font.")
+            try:
+                return pg_font_module.SysFont("arial", size)
+            except Exception as e_sys:
+                _mod_print(f"CRITICAL: System font 'arial' failed to load ({type(e_sys).__name__}: {e_sys}). Text rendering issues likely.")
+                raise # Re-raise if system font also fails
 
     def _re_render_text_surface(tag):
         text_obj = game_context['mod_texts'].get(tag)
@@ -154,12 +214,12 @@ def runModchart(code, game_context=None):
             text_obj['rect'].topleft = current_topleft
             return True
         except Exception as e:
-            print(f"Error re-rendering text '{tag}': {e}")
+            _mod_print(f"Error re-rendering text '{tag}': {type(e).__name__}: {e}")
             return False
 
     def create_text_api(tag, text_content='', width=0, x=0, y=0, font_path=None, size=30, color=(255,255,255), visible=True):
         if tag in game_context['mod_texts']:
-            print(f"Modchart Warning: Text tag '{tag}' already exists. Overwriting.")
+            _mod_print(f"Warning: Text tag '{tag}' already exists. Overwriting.")
         try:
             pg_font_obj = _get_pg_font(font_path, size)
             surface = pg_font_obj.render(str(text_content), True, color)
@@ -172,12 +232,13 @@ def runModchart(code, game_context=None):
             }
             return True
         except Exception as e:
-            print(f"Modchart Error: Creating text '{tag}': {e}")
+            _mod_print(f"Error creating text '{tag}': {type(e).__name__}: {e}")
             return False
 
     def show_text_api(tag):
         if tag in game_context['mod_texts']:
             game_context['mod_texts'][tag]['visible'] = True; return True
+        _mod_print(f"Warning: Attempted to show non-existent text tag '{tag}'.")
         return False
 
     def hide_text_api(tag, destroy=True):
@@ -185,47 +246,68 @@ def runModchart(code, game_context=None):
             game_context['mod_texts'][tag]['visible'] = False
             if destroy: del game_context['mod_texts'][tag]
             return True
+        _mod_print(f"Warning: Attempted to hide/destroy non-existent text tag '{tag}'.")
         return False
 
     def set_text_string_api(tag, text_content):
         if tag in game_context['mod_texts']:
             game_context['mod_texts'][tag]['text'] = str(text_content)
             return _re_render_text_surface(tag)
+        _mod_print(f"Warning: Attempted to set string for non-existent text tag '{tag}'.")
         return False
 
     def set_text_size_api(tag, size):
         if tag in game_context['mod_texts'] and isinstance(size, int) and size > 0:
             text_obj = game_context['mod_texts'][tag]
             text_obj['size'] = size
-            text_obj['pg_font'] = _get_pg_font(text_obj['font_path'], size)
-            return _re_render_text_surface(tag)
+            try:
+                text_obj['pg_font'] = _get_pg_font(text_obj['font_path'], size)
+                return _re_render_text_surface(tag)
+            except Exception as e:
+                _mod_print(f"Error setting text size for '{tag}' (font reload failed): {type(e).__name__}: {e}")
+                return False
+        if not (isinstance(size, int) and size > 0):
+             _mod_print(f"Warning: Invalid size '{size}' for text tag '{tag}'. Must be positive integer.")
+        else:
+            _mod_print(f"Warning: Attempted to set size for non-existent text tag '{tag}'.")
         return False
 
     def set_text_color_api(tag, color_value):
         if tag in game_context['mod_texts']:
             pg = game_context.get('pygame')
-            if not pg: print("Pygame not in game_context for color parsing."); return False
+            if not pg: _mod_print("Pygame not in game_context for color parsing."); return False
             try:
                 parsed_color = pg.Color(color_value) # Handles names, hex, tuples
                 game_context['mod_texts'][tag]['color'] = (parsed_color.r, parsed_color.g, parsed_color.b)
                 return _re_render_text_surface(tag)
-            except Exception as e:
-                print(f"Modchart Error: Invalid color '{color_value}' for text '{tag}': {e}")
+            except Exception as e: # Catches ValueError from pg.Color, etc.
+                _mod_print(f"Error: Invalid color '{color_value}' for text '{tag}': {type(e).__name__}: {e}")
                 return False
+        _mod_print(f"Warning: Attempted to set color for non-existent text tag '{tag}'.")
         return False
 
     def set_text_font_api(tag, font_path):
         if tag in game_context['mod_texts']:
             text_obj = game_context['mod_texts'][tag]
             text_obj['font_path'] = font_path
-            text_obj['pg_font'] = _get_pg_font(font_path, text_obj['size'])
-            return _re_render_text_surface(tag)
+            try:
+                text_obj['pg_font'] = _get_pg_font(font_path, text_obj['size'])
+                return _re_render_text_surface(tag)
+            except Exception as e:
+                _mod_print(f"Error setting text font for '{tag}' (font reload failed): {type(e).__name__}: {e}")
+                return False
+        _mod_print(f"Warning: Attempted to set font for non-existent text tag '{tag}'.")
         return False
         
     def set_text_position_api(tag, x, y):
         if tag in game_context['mod_texts']:
-            game_context['mod_texts'][tag]['rect'].topleft = (x,y)
-            return True
+            try:
+                game_context['mod_texts'][tag]['rect'].topleft = (float(x),float(y))
+                return True
+            except ValueError:
+                _mod_print(f"Warning: Invalid x/y coordinates ('{x}', '{y}') for text tag '{tag}'.")
+                return False
+        _mod_print(f"Warning: Attempted to set position for non-existent text tag '{tag}'.")
         return False
 
     def get_text_string_api(tag):
@@ -236,16 +318,13 @@ def runModchart(code, game_context=None):
 
     # --- Camera ---
     def camera_shake_api(camera_target, intensity, duration_seconds):
-        # Game.py's drawing functions will need to check game_context['active_camera_shakes']
-        # and apply offsets based on currentTime, intensity, and duration.
-        # camera_target can be 'game', 'hud', or 'other'.
         pg_time = game_context.get('pygame', {}).get('time')
-        if not pg_time: print("Pygame time not in game_context for camera_shake."); return
+        if not pg_time: _mod_print("Pygame time not in game_context for camera_shake."); return
         
         game_context['active_camera_shakes'].append({
-            'target': camera_target, 'intensity': intensity,
-            'duration': duration_seconds, 'start_time': game_context.get('currentTime', 0),
-            'id': pg_time.get_ticks() # Unique ID if needed for management
+            'target': camera_target, 'intensity': float(intensity),
+            'duration': float(duration_seconds), 'start_time': game_context.get('currentTime', 0),
+            'id': pg_time.get_ticks() 
         })
 
     # --- Input ---
@@ -254,87 +333,115 @@ def runModchart(code, game_context=None):
         nonlocal _fnf_key_map
         if _fnf_key_map is not None: return
         pg_locals = game_context.get('pygame', {}).get('locals', {})
-        if not pg_locals: print("Pygame locals not in game_context for key mapping."); _fnf_key_map = {}; return
+        if not pg_locals: _mod_print("Pygame locals not in game_context for key mapping."); _fnf_key_map = {}; return
 
-        keybinds = game_context.get('keybinds', [None]*8)
+        keybinds = game_context.get('keybinds', [None]*8) # Default to list of Nones if not found
         _fnf_key_map = {
-            "note_left": keybinds[0] or pg_locals.get('K_a'),
-            "note_down": keybinds[1] or pg_locals.get('K_s'),
-            "note_up": keybinds[2] or pg_locals.get('K_w'),
-            "note_right": keybinds[3] or pg_locals.get('K_d'),
-            "opponent_note_left": keybinds[4] or pg_locals.get('K_LEFT'),
-            "opponent_note_down": keybinds[5] or pg_locals.get('K_DOWN'),
-            "opponent_note_up": keybinds[6] or pg_locals.get('K_UP'),
-            "opponent_note_right": keybinds[7] or pg_locals.get('K_RIGHT'),
+            "note_left": keybinds[0] if len(keybinds) > 0 else pg_locals.get('K_a'),
+            "note_down": keybinds[1] if len(keybinds) > 1 else pg_locals.get('K_s'),
+            "note_up": keybinds[2] if len(keybinds) > 2 else pg_locals.get('K_w'),
+            "note_right": keybinds[3] if len(keybinds) > 3 else pg_locals.get('K_d'),
+            "opponent_note_left": keybinds[4] if len(keybinds) > 4 else pg_locals.get('K_LEFT'),
+            "opponent_note_down": keybinds[5] if len(keybinds) > 5 else pg_locals.get('K_DOWN'),
+            "opponent_note_up": keybinds[6] if len(keybinds) > 6 else pg_locals.get('K_UP'),
+            "opponent_note_right": keybinds[7] if len(keybinds) > 7 else pg_locals.get('K_RIGHT'),
             "left": pg_locals.get('K_LEFT'), "right": pg_locals.get('K_RIGHT'),
             "up": pg_locals.get('K_UP'), "down": pg_locals.get('K_DOWN'),
             "space": pg_locals.get('K_SPACE'), "enter": pg_locals.get('K_RETURN'),
             "escape": pg_locals.get('K_ESCAPE'),
-            # Add more generic key names to pg_locals mappings
         }
-        # Filter out None values if a key wasn't found in pg_locals
         _fnf_key_map = {k: v for k, v in _fnf_key_map.items() if v is not None}
 
 
     def is_key_pressed_api(button_name):
         _init_key_map()
         pg_key_module = game_context.get('pygame', {}).get('key')
-        if not pg_key_module: print("Pygame key module not in game_context."); return False
+        if not pg_key_module: _mod_print("Pygame key module not in game_context."); return False
 
-        key_code = _fnf_key_map.get(button_name.lower())
+        key_code = _fnf_key_map.get(str(button_name).lower())
         if key_code is None:
-            # Try to parse as direct K_ constant e.g. "K_x"
             pg_locals = game_context.get('pygame', {}).get('locals', {})
-            if button_name.upper() in pg_locals:
-                 key_code = pg_locals[button_name.upper()]
+            # Check if button_name is a direct K_ constant like "K_x"
+            direct_key_code = pg_locals.get(str(button_name).upper())
+            if direct_key_code is not None:
+                key_code = direct_key_code
             else:
-                print(f"Modchart Warning: Unknown key name '{button_name}' for is_key_pressed_api.")
+                _mod_print(f"Warning: Unknown key name '{button_name}' for keyPressed.")
                 return False
         
-        return pg_key_module.get_pressed()[key_code]
+        try:
+            return pg_key_module.get_pressed()[key_code]
+        except IndexError:
+            _mod_print(f"Warning: Key code {key_code} for '{button_name}' out of bounds for get_pressed().")
+            return False
 
     # keyReleased would require Game.py to populate game_context['released_keys_this_frame'] (a set of key codes)
     # def was_key_released_api(button_name):
     #     _init_key_map()
-    #     key_code = _fnf_key_map.get(button_name.lower())
-    #     if key_code is None: return False
+    #     key_code = _fnf_key_map.get(str(button_name).lower())
+    #     if key_code is None: return False # Potentially add direct K_ constant check here too
     #     return key_code in game_context.get('released_keys_this_frame', set())
 
     # --- Character Control ---
     def _get_char_obj_api(character_tag):
-        # In Game.py, player is character2, opponent is character1
-        if character_tag.lower() in ['bf', 'player']: return game_context.get('character2')
-        if character_tag.lower() in ['dad', 'opponent']: return game_context.get('character1')
-        # if character_tag.lower() == 'gf': return game_context.get('gf_character') # If you add GF
-        print(f"Modchart Warning: Unknown character tag '{character_tag}'.")
+        char_tag_lower = str(character_tag).lower()
+        if char_tag_lower in ['bf', 'player', 'character2']: return game_context.get('character2')
+        if char_tag_lower in ['dad', 'opponent', 'character1']: return game_context.get('character1')
+        # if char_tag_lower == 'gf': return game_context.get('gf_character')
+        _mod_print(f"Warning: Unknown character tag '{character_tag}'.")
         return None
+
+    def _get_char_default_pos_component(char_obj, index):
+        """Safely extracts a default position component (0 for X, 1 for Y)."""
+        default_val = 0.0
+        if hasattr(char_obj, 'pos') and char_obj.pos:
+            try:
+                # Expected structure: char_obj.pos[4][0] is a (x,y) tuple/list
+                if (isinstance(char_obj.pos, (list, tuple)) and len(char_obj.pos) > 4 and
+                    isinstance(char_obj.pos[4], (list, tuple)) and len(char_obj.pos[4]) > 0 and
+                    isinstance(char_obj.pos[4][0], (list, tuple)) and len(char_obj.pos[4][0]) > index):
+                    default_val = float(char_obj.pos[4][0][index])
+            except (TypeError, ValueError): # IndexError implicitly handled by len checks
+                _mod_print(f"Warning: Could not parse default pos component {index} from char_obj.pos. Using {default_val}.")
+                pass # Silently use default_val if structure is not as expected or conversion fails
+        return default_val
 
     def get_character_x_api(character_tag):
         char_obj = _get_char_obj_api(character_tag)
-        # This is a simplification. Character.pos is complex.
-        # Game.py's drawCharacters would need to use char_obj.mod_x if set.
-        if char_obj: return getattr(char_obj, 'mod_x', char_obj.pos[4][0][0] if char_obj.pos and len(char_obj.pos) > 4 and char_obj.pos[4] else 0)
+        if char_obj:
+            default_x = _get_char_default_pos_component(char_obj, 0)
+            return getattr(char_obj, 'mod_x', default_x)
         return 0.0
 
     def get_character_y_api(character_tag):
         char_obj = _get_char_obj_api(character_tag)
-        if char_obj: return getattr(char_obj, 'mod_y', char_obj.pos[4][0][1] if char_obj.pos and len(char_obj.pos) > 4 and char_obj.pos[4] else 0)
+        if char_obj:
+            default_y = _get_char_default_pos_component(char_obj, 1)
+            return getattr(char_obj, 'mod_y', default_y)
         return 0.0
 
     def set_character_x_api(character_tag, value):
         char_obj = _get_char_obj_api(character_tag)
         if char_obj:
-            char_obj.mod_x = float(value) # Game.py drawCharacters needs to use this
-            print(f"Modchart Note: setCharacterX for '{character_tag}' requires Game.py drawCharacters to use 'char_obj.mod_x'.")
-            return True
+            try:
+                char_obj.mod_x = float(value)
+                # _mod_print(f"Note: setCharacterX for '{character_tag}' requires Game.py drawCharacters to use 'char_obj.mod_x'.")
+                return True
+            except ValueError:
+                _mod_print(f"Warning: Invalid value '{value}' for setCharacterX. Must be a number.")
+                return False
         return False
 
     def set_character_y_api(character_tag, value):
         char_obj = _get_char_obj_api(character_tag)
         if char_obj:
-            char_obj.mod_y = float(value) # Game.py drawCharacters needs to use this
-            print(f"Modchart Note: setCharacterY for '{character_tag}' requires Game.py drawCharacters to use 'char_obj.mod_y'.")
-            return True
+            try:
+                char_obj.mod_y = float(value)
+                # _mod_print(f"Note: setCharacterY for '{character_tag}' requires Game.py drawCharacters to use 'char_obj.mod_y'.")
+                return True
+            except ValueError:
+                _mod_print(f"Warning: Invalid value '{value}' for setCharacterY. Must be a number.")
+                return False
         return False
 
     # --- Game Stats ---
@@ -343,30 +450,34 @@ def runModchart(code, game_context=None):
     def set_score_api(value): game_context['score'] = int(value)
 
     def get_misses_api(): return game_context.get('misses', 0)
-    def add_misses_api(value): game_context['misses'] = game_context.get('misses', 0) + int(value) # Game.py also modifies this
+    def add_misses_api(value): game_context['misses'] = game_context.get('misses', 0) + int(value)
     def set_misses_api(value): game_context['misses'] = int(value)
 
-    def get_hits_api(): return game_context.get('hits', 0) # Game.py needs to increment 'hits'
+    def get_hits_api(): return game_context.get('hits', 0)
     def add_hits_api(value): game_context['hits'] = game_context.get('hits', 0) + int(value)
     def set_hits_api(value): game_context['hits'] = int(value)
 
-    def get_health_api(): # Game.py health is 0-100. API wants 0-2.
-        return game_context.get('health', 50) / 50.0
-    def add_health_api(value): # value is in 0-2 range
-        current_health_100 = game_context.get('health', 50)
-        change_100 = float(value) * 50.0
+    def get_health_api():
+        return game_context.get('health', HEALTH_API_SCALING_FACTOR) / HEALTH_API_SCALING_FACTOR
+
+    def add_health_api(value):
+        current_health_100 = game_context.get('health', HEALTH_API_SCALING_FACTOR)
+        change_100 = float(value) * HEALTH_API_SCALING_FACTOR
         game_context['health'] = builtins.min(builtins.max(current_health_100 + change_100, 0), 100)
-    def set_health_api(value=1.0): # value is in 0-2 range, default 1.0 (50% health in game)
-        game_context['health'] = builtins.min(builtins.max(float(value) * 50.0, 0), 100)
+
+    def set_health_api(value=1.0):
+        game_context['health'] = builtins.min(builtins.max(float(value) * HEALTH_API_SCALING_FACTOR, 0), 100)
 
 
     # --- Prepare execution environment for the mod script ---
     mod_script_globals = {
-        # Callbacks (will be overwritten if defined by mod)
+        # Callbacks (will be overwritten if defined by mod in game_context)
+        # These are defaults for the API function map, not for final_mod_functions directly.
         "onHit": emptyfunc, "onMiss": emptyfunc, "onKeyPress": emptyfunc,
         "onUpdate": emptyfunc, "onBeat": emptyfunc, "onStep": emptyfunc,
-        "onSongStart": emptyfunc, "onSongEnd": emptyfunc,
+        "onSongStart": emptyfunc, "onSongEnd": emptyfunc, # This is for the game to call
         "onNoteCreation": emptyfunc, "init": None,
+        "onSongWillEnd": emptyfunc, # Mod can define this, end_song_api will check game_context for it
 
         # API Functions
         "endSong": end_song_api,
@@ -374,80 +485,68 @@ def runModchart(code, game_context=None):
         "restartSong": restart_song_api,
         "exitSong": exit_song_api,
 
-        "makeLuaText": create_text_api, # Legacy name
-        "create_text": create_text_api,
-        "addLuaText": show_text_api,    # Legacy name
-        "show_text": show_text_api,
-        "removeLuaText": hide_text_api, # Legacy name
-        "hide_text": hide_text_api,
+        "makeLuaText": create_text_api, "create_text": create_text_api,
+        "addLuaText": show_text_api, "show_text": show_text_api,
+        "removeLuaText": hide_text_api, "hide_text": hide_text_api,
         "setTextString": set_text_string_api,
         "setTextSize": set_text_size_api,
         "setTextColor": set_text_color_api,
         "setTextFont": set_text_font_api,
-        "setTextPosition": set_text_position_api, # Added
-        # TODO: setTextWidth, setTextHeight, setTextAutoSize, setTextBorder, setTextItalic, setTextAlignment
+        "setTextPosition": set_text_position_api,
         "getTextString": get_text_string_api,
-        # TODO: getTextSize, getTextFont, getTextWidth
-        "luaTextExists": text_exists_api, # Legacy name
-        "text_exists": text_exists_api,
+        "luaTextExists": text_exists_api, "text_exists": text_exists_api,
 
         "cameraShake": camera_shake_api,
+        "keyPressed": is_key_pressed_api,
+        # "keyReleased": was_key_released_api, # Requires Game.py changes
 
-        "keyPressed": is_key_pressed_api, # Renamed from is_key_pressed_api for mod script
-        # "keyReleased": was_key_released_api,
+        "getCharacterX": get_character_x_api, "getCharacterY": get_character_y_api,
+        "setCharacterX": set_character_x_api, "setCharacterY": set_character_y_api,
 
-        "getCharacterX": get_character_x_api,
-        "getCharacterY": get_character_y_api,
-        "setCharacterX": set_character_x_api,
-        "setCharacterY": set_character_y_api,
-
-        "getScore": get_score_api,
-        "addScore": add_score_api,
-        "setScore": set_score_api,
-        "getMisses": get_misses_api,
-        "addMisses": add_misses_api,
-        "setMisses": set_misses_api,
-        "getHits": get_hits_api,
-        "addHits": add_hits_api,
-        "setHits": set_hits_api,
-        "getHealth": get_health_api,
-        "addHealth": add_health_api,
-        "setHealth": set_health_api,
+        "getScore": get_score_api, "addScore": add_score_api, "setScore": set_score_api,
+        "getMisses": get_misses_api, "addMisses": add_misses_api, "setMisses": set_misses_api,
+        "getHits": get_hits_api, "addHits": add_hits_api, "setHits": set_hits_api,
+        "getHealth": get_health_api, "addHealth": add_health_api, "setHealth": set_health_api,
         
-        # Expose some safe builtins and modules
-        "math": __import__("math"),
-        "random": __import__("random"),
+        "math": __import__("math"), "random": __import__("random"),
         "str": str, "int": int, "float": float, "bool": bool, "list": list, "dict": dict, "tuple": tuple,
-        "min": builtins.min, "max": builtins.max, "abs": builtins.abs, "round": round, "len": len, "print": print, # Override print for safety?
-        # "game": game_context, # Direct access to game_context (use with caution)
+        "min": builtins.min, "max": builtins.max, "abs": builtins.abs, "round": round, "len": len,
+        "print": _mod_print, # Use the custom, prefixed print
+        # "game": game_context, # Direct access to game_context (use with caution, generally prefer APIs)
     }
-    if game_context.get('pygame'): # Expose pygame modules if available
-        mod_script_globals['pygame_display'] = game_context['pygame'].get('display')
-        mod_script_globals['pygame_draw'] = game_context['pygame'].get('draw')
-        mod_script_globals['pygame_transform'] = game_context['pygame'].get('transform')
-        mod_script_globals['pygame_font'] = game_context['pygame'].get('font')
-        mod_script_globals['pygame_Rect'] = game_context['pygame'].get('Rect')
-
+    if game_context.get('pygame'): # Expose specific pygame modules/functions if available
+        pg_data = game_context['pygame']
+        mod_script_globals['pygame_display'] = pg_data.get('display')
+        mod_script_globals['pygame_draw'] = pg_data.get('draw')
+        mod_script_globals['pygame_transform'] = pg_data.get('transform')
+        mod_script_globals['pygame_font_module'] = pg_data.get('font') # Renamed to avoid conflict if mod imports pygame.font
+        mod_script_globals['PygameRect'] = pg_data.get('Rect') # Capitalized to indicate class
 
     # Execute the modchart code
+    # Functions and global variables defined by the mod script will end up in `game_context` (locals).
     try:
-        exec(code, mod_script_globals)
+        sandboxed_exec(code, globals=mod_script_globals, locals=game_context)
     except Exception as e:
-        print(f"Error executing modchart code: {e}")
-        # Return default functions if execution fails badly
-        return create_generic_modchart_funcs()
+        # Error already printed by sandboxed_exec, or SyntaxError from check_modchart
+        _mod_print(f"Critical error executing modchart code. Mod will not run. Error: {type(e).__name__}: {e}")
+        return create_generic_modchart_funcs() # Return default functions
 
-    # Extract the callback functions that might have been defined/overridden by the modchart
+    # Extract the callback functions that might have been defined/overridden by the modchart.
+    # These will be in `game_context` as it was the `locals` dict for `sandboxed_exec`.
     final_mod_functions = create_generic_modchart_funcs() # Start with defaults
     for cb_name in final_mod_functions:
-        if cb_name in mod_script_globals and callable(mod_script_globals[cb_name]):
-            final_mod_functions[cb_name] = mod_script_globals[cb_name]
+        if cb_name in game_context and callable(game_context[cb_name]):
+            final_mod_functions[cb_name] = game_context[cb_name]
+        elif cb_name in game_context: # Defined but not callable
+             _mod_print(f"Warning: Mod defined '{cb_name}' but it is not a callable function. Using default.")
 
-    # Call the mod's init function if it was defined
-    if final_mod_functions["init"] and callable(final_mod_functions["init"]):
+
+    # Call the mod's init function if it was defined and is callable
+    # `final_mod_functions["init"]` will be the mod's init or None (the default)
+    if final_mod_functions["init"] and final_mod_functions["init"] is not None: # Ensure it's not the default None
         try:
             final_mod_functions["init"]()
         except Exception as e:
-            print(f"Error in modchart init() function: {e}")
+            _mod_print(f"Error in modchart init() function: {type(e).__name__}: {e}")
 
     return final_mod_functions
