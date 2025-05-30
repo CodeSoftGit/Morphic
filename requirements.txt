@@ -1,0 +1,4 @@
+pygame
+psutil
+pyperclip
+pyinstaller

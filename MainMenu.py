@@ -8,11 +8,12 @@ import random
 from Game import MainMenu # Assuming Game.py and MainMenu class exist
 from DevTools import DevTools # Assuming DevTools.py and DevTools class exist
 import os
+import traceback
 
 pygame.init()
 
 # --- Constants and Configuration ---
-VERSION = '1.0.2-alpha-visual-fx' # Updated version
+VERSION = '1.1.1' # Updated version
 DEV_TOOLS_ENABLED = True # Set to False to disable DevTools
 
 # Screen setup
@@ -623,7 +624,7 @@ def update_menu_items():
             item_y = middleScreen[1] + 100 * (k - selectedKeybind)
             menuItems.append(MenuItem(text, (middleScreen[0], item_y), k == selectedKeybind, keybind_font_normal, keybind_font_selected, tooltip=keybind_tooltips_list[k], is_button=True))
 
-credits_data=[{'header':"FUNKIN' TEAM",'description':'The people who worked on the original game!','members':[{'name':'ninjamuffin99','role':'Programmer'},{'name':'PhantomArcade','role':'Animator'},{'name':'evilsk8r','role':'Artist'},{'name':'Kawaisprite','role':'Composer'}]},{'header':'MORPHIC ENGINE TEAM','description':'The people who made the Morphic Engine (this) possible!','members':[{'name':'CodeSoft','role':'Original Developer'},{'name':'AI Assistant','role':'Enhancements & Refinements'}]}]
+credits_data=[{'header':"FUNKIN' TEAM",'description':'The people who worked on the original game!','members':[{'name':'ninjamuffin99','role':'Programmer'},{'name':'PhantomArcade','role':'Animator'},{'name':'evilsk8r','role':'Artist'},{'name':'Kawaisprite','role':'Composer'}]},{'header':'MORPHIC ENGINE TEAM','description':'The people who made the Morphic Engine (this) possible!','members':[{'name':'CodeSoft','role':'Developer'}]}]
 credits_max_scroll_steps = 0
 
 def draw_credits_menu():
